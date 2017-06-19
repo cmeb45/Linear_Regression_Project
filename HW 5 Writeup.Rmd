@@ -1,0 +1,700 @@
+---
+title: "HW 5: Writeup"
+author: 'Christopher Rusnak (UNI: cjr2176)'
+date: "November 28, 2016"
+output: pdf_document
+fig_caption: yes
+---
+
+```{r setup, include=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(dev = 'pdf')
+
+library(car)
+library(ggplot2)
+library(leaps)
+library(lme4)
+library(MASS)
+library(plyr)
+library(qcc)
+library(sqldf)
+library(xtable)
+
+options(xtable.comment = FALSE)
+
+## CUSTOM FUNCTIONS
+# Multiple plot function 
+# Credit goes to Cookbook for R (http://www.cookbook-r.com/Graphs/Multiple_graphs_on_one_page_(ggplot2)/)
+# ggplot objects can be passed in ..., or to plotlist (as a list of ggplot objects)
+# - cols:   Number of columns in layout
+# - layout: A matrix specifying the layout. If present, 'cols' is ignored.
+#
+# If the layout is something like matrix(c(1,2,3,3), nrow=2, byrow=TRUE),
+# then plot 1 will go in the upper left, 2 will go in the upper right, and
+# 3 will go all the way across the bottom.
+#
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  library(grid)
+  
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+  
+  numPlots = length(plots)
+  
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                     ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+  
+  if (numPlots==1) {
+    print(plots[[1]])
+    
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+    
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+      
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+
+
+```
+
+**I. Introduction**
+
+We have been provided data on 24,823 males who work full time in the United States and whose ages range from 18 to 70. Our dataset includes the following covariates:
+
+1. Weekly wages (in US dollars)
+2. Number of years of school
+3. Indicator of graduating college (*yes* or *no*)
+4. Indicator of being employed close to or within a city (*yes* or *no*)
+5. US region (*west*, *midwest*, *south*, or *northeast*)
+6. race (*black*, *white*, or *other*)
+7. Travel distance from residence to employer
+8. Total company employees
+9. Number of years of employment
+
+
+There are two goals of this case study:
+
+1. Formulate a linear regression model that includes the most indicative variables, interaction terms, and functional expressions of the input variables.
+
+2. Apply this model to answer the following research questions:
+     a. Is there a statistically significant difference between wages for African American men and wages for Caucasian men?
+     
+     b. Is there a statistically significant difference between wages for African American men and wages for all other men?
+
+
+Below are dataset summary statistics for wage and race: 
+
+
+```{r, results="asis", echo=FALSE, message=FALSE}
+## INPUT DATA
+# Read the data as a data frame
+data <- read.table(file = "salary.txt", sep = ",", header = TRUE)
+
+## SUMMARY STATISTICS
+wage.sum <- data.frame(wage = data$wage)
+race.sum <- data.frame(race = data$race)
+print(xtable(summary(wage.sum)))
+print(xtable(summary(race.sum)))
+
+```
+
+On average, full-time US employees in this dataset earn `r paste("$",round(mean(data$wage),2),sep="")` per week, or about `r paste("$",52*round(mean(data$wage),2),sep="")` per year. The first and third quartiles of weekly wages are within $300 of this average, indicating that there are relatively few outiers or extreme values.
+
+These summary statistics indicate that African American males comprise about `r paste(round(100*sum(data$race=="black")/nrow(data),1),"%",sep="")` of full-time employees, and are the smallest group in the dataset. However, they collectively only have `r paste(round(100*sum(data[which(data$race=="black"),"wage"])/sum(data$wage),1),"%",sep="")` of the total wages, which is smaller than their proportionality in the dataset. This result may be an indicator of wealth inequality between different races, which will be formally tested in Section III. This point is further exemplified by the following Pareto chart on distribution of weekly wages.
+
+```{r, echo=FALSE, message=FALSE}
+# Aggregate wages by race for Pareto chart
+data.agg <- sqldf("SELECT race, SUM(wage) AS total_wages
+                     FROM data
+                 GROUP BY race")
+data.counts <- data.agg$total_wages
+names(data.counts) <- data.agg$race
+
+```
+
+```{r, echo=FALSE, message=FALSE,include=TRUE,fig.cap="Salary Distribution"}
+p <- pareto.chart(data.counts, ylab="Total Weekly Wages",
+             xlab="Race",
+             main="Pareto Chart for Total Weekly Wages per Racial Group")
+```
+
+To begin to answer the research questions, we look at the distribution of wages for each race. Figure 2 shows overlaid histograms and boxplots of wages for black males and white males. They demonstrate that white males have higher proportions of individuals with higher wages than black males.
+
+```{r, echo=FALSE, message=FALSE}
+# Black or white males
+black_white <- subset(data,data$race %in% c("black","white"))
+
+# Overlaid histograms of wages for black males & white males
+p1 <- ggplot(black_white, aes(x = log(wage), fill = race)) +
+  geom_histogram(binwidth = 0.5, alpha = 0.5, position = "identity")+
+  ggtitle("Overlaid histograms of wages for black and white males") +
+  xlab("Log of Wages") + ylab("# of Employees")
+
+p2 <- ggplot(black_white, aes(x = race, y = log(wage), fill = race)) + 
+  geom_boxplot() + ggtitle("Boxplots of wages for black and white males") +
+  ylab("Log of Wages") + xlab("Race")
+
+
+```
+
+```{r, echo=FALSE, message=FALSE, include=TRUE,fig.cap="Wage Distributions of Black and White Males"}
+multiplot(p1, p2, cols = 1)
+```
+
+Figure 3 shows overlaid histograms and boxplots of wages for black males and all other males. They also show that all other males have higher proportions of individuals with higher wages than black males.
+
+```{r, echo=FALSE, message=FALSE}
+# Black & all other males
+black_other <- data
+black_other$race <- revalue(black_other$race, 
+                            c("white"="all other", "other"="all other"))
+
+# Overlaid histograms of wages for black males & all other males
+p1 <- ggplot(black_other, aes(x = log(wage), fill = race)) +
+  geom_histogram(binwidth = 0.5, alpha = 0.5, position = "identity")+
+  ggtitle("Overlaid histograms of wages for black and all other males") +
+  xlab("Log of Wages") + ylab("# of Employees")
+
+p2 <- ggplot(black_other, aes(x = race, y = log(wage), fill = race)) + 
+  geom_boxplot() + ggtitle("Boxplots of wages for black and all other males") +
+  ylab("Log of Wages") + xlab("Race")
+
+```
+
+```{r, echo=FALSE, message=FALSE, include=TRUE,fig.cap="Wage Distributions of Black and all Other Males"}
+multiplot(p1, p2, cols = 1)
+```
+
+**II. Statistical Model**
+
+```{r, echo=FALSE, message=FALSE, include=FALSE}
+## SUBSET THE DATA
+
+# Split data into training (80%) and testing (20%) subsets
+n <- nrow(data)
+n.test <- round(0.2*n)
+n.train <- n - n.test
+set.seed(0)
+index <- sample(1:n,n.test,replace = F)
+train.data <- data[-index,]
+test.data <- data[index,]
+
+# Quality control check
+black.train.per <- sum(train.data$race=="black")/nrow(train.data)
+black.test.per <- sum(test.data$race=="black")/nrow(test.data)
+if(abs(black.train.per - black.test.per) <= 0.01){
+  print("Both subsets have similar proportions of black males")
+} else{
+  print("Error: Training & testing subsets have different data proportions")
+}
+```
+
+A linear regression model was built to predict weekly wage values. For the final model, the following variables were selected:
+
+1. Number of years of school (*edu*)
+2. Number of years of employment (*exp*)
+3. Indicator of being employed close to or within a city (*city*)
+4. US region(*reg*)
+5. Racial group (*race*)
+6. Indicator of graduating college (*deg*)
+7. Interaction between *race* and *reg*
+8. Interaction between *city* and *reg*
+9. Interaction between *edu* and *race*
+10. Interaction between *edu* and *city*
+11. Interaction between *edu* and *reg*
+12. Interaction between *edu* and *deg*
+
+
+In addition, a natural logarithm transformation was applied to the wages. No functional transformations were applied to any of the covariates. The summary output of the model is as follows:
+
+
+```{r, results="asis", echo=FALSE, message=FALSE}
+## FINAL LINEAR REGRESSION MODEL
+final_model <- lm(log(wage)~edu+exp+city+reg+race+deg+
+                    race*reg + city*reg + edu*race + edu*city +
+                    edu*reg + edu*deg,data=train.data)
+print(summary(final_model)$call)
+```
+
+
+```{r, results="asis", echo=FALSE, message=FALSE}
+print(paste("F statistic value: ",summary(final_model)$fstatistic[[1]]))
+```
+
+```{r, results="asis", echo=FALSE, message=FALSE}
+print(paste("F statistic numerator: ",summary(final_model)$fstatistic[[2]]))
+```
+
+```{r, results="asis", echo=FALSE, message=FALSE}
+print(paste("F statistic denominator: ",summary(final_model)$fstatistic[[3]]))
+```
+
+```{r, results="asis", echo=FALSE, message=FALSE}
+print(xtable(summary(final_model)))
+```
+
+The final model statistics on the model building dataset are as follows:
+
+- *AIC*: `r paste(round(AIC(final_model),2))`
+
+- $R^2$: `r paste(round(summary(final_model)$r.squared,3))`
+
+- $R^2_a$: `r paste(round(summary(final_model)$adj.r.squared,3))`
+
+
+
+
+**III. Research Question**
+
+To answer each research question, we turn to the appropriate statistical hypothesis testing procedures. 
+
+For the first research question, we want to know if the average weekly wage differs between African American males and Caucasian males. We subset the data to focus on these two groups. We establish the null hypothesis that the average weekly wages are the same per group, against the alternate hypothesis that average weekly wages differ between groups. We perform one-way ANOVA to test this pair of hypotheses, at a significance level of 0.05.
+
+
+```{r, results="asis", echo=FALSE, message=FALSE}
+# Create indicator variable
+black_white$black <- I(black_white$race=="black")
+
+# ANOVA regression analysis
+fit <- aov(wage ~ black, data=black_white)
+print(xtable(summary(fit)))
+
+```
+
+Based on the low p-value `r paste("(",round(summary(fit)[[1]][[5]][1],62),")",sep="")` of the F-score `r paste("(",round(summary(fit)[[1]][[4]][1],2),")",sep="")`, we therefore reject the null hypothesis at this significance level.
+
+
+For the second research question, we are testing whether mean weekly salary is the same between African American males and all other males. In this scenario, Caucasians and other racial groups (categorized as "*other*" in the dataset) will now be grouped into a single category of "*all other*". The null hypothesis is that the average weekly wages are the same between African Americans and all others. The alternate hypothesis is that average weekly wages differ between groups. As before, we perform one-way ANOVA to test these hypotheses, setting the significance level to be 0.05.
+
+```{r, results="asis", echo=FALSE, message=FALSE}
+# Create indicator variable
+black_other$black <- I(black_other$race=="black")
+
+# ANOVA regression analysis
+fit <- aov(wage ~ black, data=black_other)
+print(xtable(summary(fit)))
+
+```
+
+Based on the low p-value `r paste("(",round(summary(fit)[[1]][[5]][1],65),")",sep="")` of the F-score `r paste("(",round(summary(fit)[[1]][[4]][1],2),")",sep="")`, we therefore reject the null hypothesis at this significance level.
+
+
+Both of these findings indicate that, as a whole, African American males earn less money per week than their Caucasian counterparts, as well as males from all other races. For further investigation, it would be helpful to have additional demographic and employment information about the employees, such as job title, sector (information technology, construction, etc.), employer name, employer location, number of years working for employer, and others. For a more comprehensive study, it would be worth including data from female full-time employees, as well as providing more specific race information about employees categorized as "other".
+
+
+**IV. Appendix**
+
+a. **Model Selection**
+
+With a pseudo-random seed of 0, the dataset was partitioned into two subsets: approximately 80% was used for model training, while the remaining 20% was applied for model validation. To determine which covariates to include in the model, each independent variable was plotted against the corresponding wage values. To increase the spread of the data in the plots, we applied the natural logarithm transformation to the wage values. In addition, we also computed the correlation between the natural log of the wages and each of the numeric variables (*com*, *emp*, *exp*, and *edu*). As a rule of thumb, variables whose correlation coefficients were below 15% and did not have a clear relationship (linear or non-linear) with the log of the wages in their plots were not included in any of our models. Commuting distance and the number of employees had low correlation coefficients (`r paste(round(100*cor(log(train.data$wage),train.data$com),3),"%",sep="")` and `r paste(round(100*cor(log(train.data$wage),train.data$emp),3),"%",sep="")`, respectively), and this finding was supported by their scatter plots. As such, these two variables were removed from consideration. Figures 4 and 5 display the scatter plots and box plots that we produced in our exploratory data analysis.
+
+
+```{r, echo=FALSE, message=FALSE, include=FALSE}
+## BASIC SCATTER PLOTS & BOX PLOTS
+# Race vs. wage
+p1 <- ggplot(train.data, aes(x = race, y = log(wage), fill = race)) +
+  geom_boxplot()+ylab("Log of Wages") + xlab("Race")
+
+
+# Years of education vs. Wage
+p2 <- ggplot(train.data, aes(x = edu, y = log(wage), color = race)) + 
+  geom_point(shape=1)+ylab("Log of Wages") + xlab("Years of Education")
+# Less years of education have lower wages & less variance
+# More years of education have higher wages & more variance
+
+cor(log(train.data$wage),train.data$edu)
+# 0.3697235
+
+
+
+# Years of job experience vs. wage
+p3 <- ggplot(train.data, aes(x = exp, y = log(wage), color = race)) + 
+  geom_point(shape=1)+ylab("Log of Wages") + xlab("Years of Job Experience")
+# Wages increase then plateau with more job experience
+
+cor(log(train.data$wage),train.data$exp)
+# 0.2327511
+
+
+# City vs. wage
+p4 <- ggplot(train.data, aes(x = city, y = log(wage), fill = race)) + 
+  geom_boxplot()+ylab("Log of Wages") + xlab("Live in/near City?")
+# Those who live in/near city have higher wages
+
+
+# Region vs. wage
+p5 <- ggplot(train.data, aes(x = reg, y = log(wage), fill = race)) + 
+  geom_boxplot()+ylab("Log of Wages") + xlab("US Region")
+# South has lower wages; other regions have similar spread
+
+
+# College graduate vs. wage
+p6 <- ggplot(train.data, aes(x = deg, y = log(wage), fill = race)) + 
+  geom_boxplot()+ylab("Log of Wages") + xlab("Graduated College?")
+# College graduates have significantly higher wages
+
+
+# Commuting distance vs. wage
+p7 <- ggplot(train.data, aes(x = com, y = log(wage), color = race)) + 
+  geom_point(shape=1)+ylab("Log of Wages") + xlab("Commuting Distance")
+# Wages independent of commuting distance
+
+cor(log(train.data$wage),train.data$com)
+# 0.001886612
+
+# Number of employees vs. wage
+p8 <- ggplot(train.data, aes(x = emp, y = log(wage), color = race)) + 
+  geom_point(shape=1)+ylab("Log of Wages") + xlab("# of Employees")
+# Wages independent of number of employees
+
+cor(log(train.data$wage),train.data$emp)
+# 0.05989805
+```
+
+
+```{r, echo=FALSE, message=FALSE, include=TRUE,fig.cap="Basic Scatter Plots and Box Plots"}
+multiplot(p1, p2, p3, p4, cols = 2)
+```
+
+```{r, echo=FALSE, message=FALSE, include=TRUE,fig.cap="Basic Scatter Plots and Box Plots"}
+multiplot(p5, p6, p7, p8, cols = 2)
+```
+
+Regarding interaction effects, we examined two-way interaction plots for combinations of covariates for which it would be reasonable to hypothesize that together have an effect on wages. For example, while living in or near a major city may be correlated with higher wages, how high those wages are may also depend on the region in which that city is located. We produced these plots for the following combinations of variables:
+
+1. *edu* vs. *race*
+2. *edu* vs. *city*
+3. *edu* vs. *reg*
+4. *edu* vs. *deg*
+5. *race* vs. *reg*
+6. *race* vs. *city*
+7. *race* vs. *deg*
+8. *city* vs. *reg*
+9. *city* vs. *deg*
+10. *reg* vs. *deg*
+
+```{r, echo=FALSE, message=FALSE, include=FALSE}
+## INTERACTION PLOTS
+
+# Education vs. Race (Yes)
+dataInt <- ddply(train.data,.(edu,race),summarise, val = mean(log(wage)))
+p1 <- ggplot(train.data, aes(x = factor(edu), y = log(wage), colour = race)) + 
+    geom_boxplot() + 
+    geom_point(data = dataInt, aes(y = val)) +
+    geom_line(data = dataInt, aes(y = val, group = race)) + 
+    theme_bw() + xlab("Education (years)")+ylab("Log of Wages")
+
+
+# Education vs. City (Yes)
+dataInt <- ddply(train.data,.(edu,city),summarise, val = mean(log(wage)))
+p2 <- ggplot(train.data, aes(x = factor(edu), y = log(wage), colour = city)) + 
+    geom_boxplot() + 
+    geom_point(data = dataInt, aes(y = val)) +
+    geom_line(data = dataInt, aes(y = val, group = city)) + 
+    theme_bw() + xlab("Education (years)")+ylab("Log of Wages")+ labs(colour = "Live in/near City?")
+
+
+# Education vs. Region (Yes)
+dataInt <- ddply(train.data,.(edu,reg),summarise, val = mean(log(wage)))
+p3 <- ggplot(train.data, aes(x = factor(edu), y = log(wage), colour = reg)) + 
+    geom_boxplot() + 
+    geom_point(data = dataInt, aes(y = val)) +
+    geom_line(data = dataInt, aes(y = val, group = reg)) + 
+    theme_bw() + xlab("Education (years)")+ylab("Log of Wages")+ labs(colour = "US Region")
+
+
+# Education vs. Degree (Yes)
+dataInt <- ddply(train.data,.(edu,deg),summarise, val = mean(log(wage)))
+p4 <- ggplot(train.data, aes(x = factor(edu), y = log(wage), colour = deg)) + 
+    geom_boxplot() + 
+    geom_point(data = dataInt, aes(y = val)) +
+    geom_line(data = dataInt, aes(y = val, group = deg)) + 
+    theme_bw() + xlab("Education (years)")+ylab("Log of Wages")+ labs(colour = "Graduated College?")
+
+
+# Race vs. Region (Yes)
+dataInt <- ddply(train.data,.(race,reg),summarise, val = mean(log(wage)))
+p5 <- ggplot(train.data, aes(x = factor(race), y = log(wage), colour = reg)) + 
+    geom_boxplot() + 
+    geom_point(data = dataInt, aes(y = val)) +
+    geom_line(data = dataInt, aes(y = val, group = reg)) + 
+    theme_bw() + xlab("Race")+ylab("Log of Wages")+ labs(colour = "US Region")
+
+# Race vs. City (No)
+dataInt <- ddply(train.data,.(race,city),summarise, val = mean(log(wage)))
+p6 <- ggplot(train.data, aes(x = factor(race), y = log(wage), colour = city)) + 
+    geom_boxplot() + 
+    geom_point(data = dataInt, aes(y = val)) +
+    geom_line(data = dataInt, aes(y = val, group = city)) + 
+    theme_bw() + xlab("Race")+ylab("Log of Wages")+ labs(colour = "Live in/near City?")
+
+
+# Race vs. Degree (No)
+dataInt <- ddply(train.data,.(race,deg),summarise, val = mean(log(wage)))
+p7 <- ggplot(train.data, aes(x = factor(race), y = log(wage), colour = deg)) + 
+    geom_boxplot() + 
+    geom_point(data = dataInt, aes(y = val)) +
+    geom_line(data = dataInt, aes(y = val, group = deg)) + 
+    theme_bw() + xlab("Race")+ylab("Log of Wages")+ labs(colour = "Graduated College?")
+
+
+# City vs. Region (Yes)
+dataInt <- ddply(train.data,.(city,reg),summarise, val = mean(log(wage)))
+p8 <- ggplot(train.data, aes(x = factor(city), y = log(wage), colour = reg)) + 
+    geom_boxplot() + 
+    geom_point(data = dataInt, aes(y = val)) +
+    geom_line(data = dataInt, aes(y = val, group = reg)) + 
+    theme_bw() + xlab("Live in/near City?")+ylab("Log of Wages")+ labs(colour = "US Region")
+
+
+# City vs. Degree (No)
+dataInt <- ddply(train.data,.(city,deg),summarise, val = mean(log(wage)))
+p9 <- ggplot(train.data, aes(x = factor(city), y = log(wage), colour = deg)) + 
+    geom_boxplot() + 
+    geom_point(data = dataInt, aes(y = val)) +
+    geom_line(data = dataInt, aes(y = val, group = deg)) + 
+    theme_bw() + xlab("Live in/near City?")+ylab("Log of Wages")+ labs(colour = "Graduated College?")
+
+# Region vs. Degree (No)
+dataInt <- ddply(train.data,.(reg,deg),summarise, val = mean(log(wage)))
+p10 <- ggplot(train.data, aes(x = factor(reg), y = log(wage), colour = deg)) + 
+    geom_boxplot() + 
+    geom_point(data = dataInt, aes(y = val)) +
+    geom_line(data = dataInt, aes(y = val, group = deg)) + 
+    theme_bw() + xlab("US Region")+ylab("Log of Wages")+ labs(colour = "Graduated College?")
+
+```
+
+
+```{r, echo=FALSE, message=FALSE, include=TRUE,fig.cap="Interaction Plots"}
+multiplot(p1, p2, cols = 1)
+```
+
+```{r, echo=FALSE, message=FALSE, include=TRUE,fig.cap="Interaction Plots"}
+multiplot(p3, p4, cols = 1)
+```
+
+```{r, echo=FALSE, message=FALSE, include=TRUE,fig.cap="Interaction Plots"}
+multiplot(p5, p6, cols = 1)
+```
+
+```{r, echo=FALSE, message=FALSE, include=TRUE,fig.cap="Interaction Plots"}
+multiplot(p7, p8, cols = 1)
+```
+
+```{r, echo=FALSE, message=FALSE, include=TRUE,fig.cap="Interaction Plots"}
+multiplot(p9, p10, cols = 1)
+```
+
+
+Figures 6 through 10 show these interaction plots. We determined that, of the above list of possible interaction terms, the combinations (6), (7), (9), and (10) do not have any apparent interaction effects, and so they were not considered in any of our models.
+
+We produced a total of our feasible candidate linear regression models, henceforth labeled as *Model 1*, *Model 2*, *Model 3*, and *Model 4*.
+
+*Model 1* the simplest model and contained no interaction terms or variable transformations. It included the following covariates: *edu*,*exp*,*city*,*reg*,*race*, and *deg*. These are all of the covariates that we deemed to have a significant relationship with wages. 
+
+```{r, echo=FALSE, message=FALSE, include=FALSE}
+## MODEL FORMATION
+
+# Rough model 1 (All but 2 variables; no transformations)
+m1 <- lm(wage~edu+exp+city+reg+race+deg,data=train.data)
+
+# BoxCox procedure (Transformation of dependent variable)
+bac.box = boxcox(wage ~ race + edu + city + reg + deg,data = train.data)
+where.max.y = which(bac.box$y == max(bac.box$y))
+bac.lambda = bac.box$x[where.max.y]
+```
+
+We applied a Box-Cox Transformation on the dependent variable (*wage*), resulting in a power transformation value of `r paste(round(bac.lambda,2))`. As such, we decided to apply the natural logarithm transformation to the wage variable.
+
+*Model 2* is the same as the previous model, but has the aforementioned transformation of the dependent variable. Both of these models serve as effective baselines.
+
+```{r, echo=FALSE, message=FALSE, include=FALSE}
+# Rough model 2 (All but 2 variables; dependent variable transformation)
+m2 <- lm(log(wage)~edu+exp+city+reg+race+deg,data=train.data)
+
+# Rough model 3 (All but 2 variables; dependent variable transformation; interaction with region)
+m3 <- lm(log(wage)~edu+exp+city+reg+race+deg+
+           race*reg + city*reg,data=train.data)
+
+# Rough model 4 (All but 2 variables; dependent variable transformation; interactions with region & education)
+m4 <- lm(log(wage)~edu+exp+city+reg+race+deg+
+           race*reg + city*reg + edu*race + edu*city +
+           edu*reg + edu*deg,data=train.data)
+
+```
+
+*Model 3* adds to *Model 2* the interaction terms with respect to the region covariate (*race & reg* and *city & reg*). *Model 4* adds all of the interaction terms (*race & reg*, *city & reg*, *edu & race*, *edu & city*, *edu & reg*, and *edu & deg*). For each model, we calculated the *AIC*, *BIC*, $R^2$, and adjusted $R^2 (R^2_a)$ on the model building dataset. These evaluation statistics are provided below:
+
+```{r, results="asis", echo=FALSE, message=FALSE}
+## MODEL SELECTION: EVALUATION
+# Evaluate on model building set
+# Include R^2, R^2_a, AIC, BIC
+# Select final model
+
+AIC_values <- c(round(AIC(m1),2), round(AIC(m2),2),
+                round(AIC(m3),2),round(AIC(m4),2))
+
+BIC_values <- c(round(BIC(m1),2), round(BIC(m2),2),
+                round(BIC(m3),2),round(BIC(m4),2))
+
+R_2_values <- c(round(summary(m1)$r.squared,3), 
+                round(summary(m2)$r.squared,3),
+                round(summary(m3)$r.squared,3),
+                round(summary(m4)$r.squared,3)
+                )
+
+R_2_adj_values <- c(round(summary(m1)$adj.r.squared,3), 
+                round(summary(m2)$adj.r.squared,3),
+                round(summary(m3)$adj.r.squared,3),
+                round(summary(m4)$adj.r.squared,3)
+                )
+
+model_values <- data.frame(AIC = AIC_values,
+                           BIC = BIC_values,
+                           R_2 = R_2_values,
+                           adj_R_2 = R_2_adj_values)
+row.names(model_values) <- c("Model 1", "Model 2", 
+                            "Model 3","Model 4")
+
+print(xtable(model_values))
+
+```
+
+*Model 4* had the highest values of $R^2$ and $R^2_a$, along with the lowest value of *AIC*. Therefore, it is our choice for the final model.
+
+b. **Diagnostics and Model Validation**
+
+The following are diagnostic plots for the final model on the model building dataset. Figure 11 consists of the QQ plot of studentized deleted residuals; the histogram of studentized deleted residuals; a line plot of studentized deleted residuals; and a plot of studentized deleted residuals against predicted values.
+
+```{r, echo=FALSE, message=FALSE, include=FALSE}
+# Studentized deleted residuals
+res <- rstudent(final_model)
+
+# QQ plot of Studentized Deleted Residuals
+p1 <- qplot(sample = res, data = train.data)
+# Plot straight line
+p1 <- p1 + geom_abline(intercept = 0, slope = 1) +
+  ggtitle("QQ Plot")
+
+# Histogram of Studentized Deleted Residuals
+p2 <- qplot(res, geom="histogram", binwidth=0.25) +
+  ggtitle("Histogram") +
+  xlab("Studentized Deleted Residuals")
+
+# Line plot of Studentized Deleted Residuals
+dat <- data.frame(xvar = 1:n.train, yvar = res)
+p3 <- ggplot(dat, aes(x = xvar, y = yvar))+
+  geom_point(shape=1)+geom_path(colour="red")+ggtitle("Line Plot")+
+  xlab("")+ylab("Deleted Residuals")
+
+# Predicted values
+y.hat <- predict(final_model)
+
+# Scatter plot of studentized deleted residuals against predicted values
+# Note that both are based on natural log values
+dat <- data.frame(xvar = y.hat, yvar = res)
+p4 <- ggplot(dat, aes(x = xvar, y = yvar))+
+  geom_point(shape=1)+ggtitle("Residual Plot")+
+  xlab("Y-hat")+ylab("Deleted Residuals")
+
+```
+
+```{r, echo=FALSE, message=FALSE, include=TRUE,fig.cap="Diagnostic Plots: Training Set"}
+multiplot(p1, p2, p3, p4, cols = 2)
+```
+
+
+We evaluate this model on the validation dataset and compute the mean square prediction error (*MSPE*) and mean square error (*MSE*). 
+
+```{r, echo=FALSE, message=FALSE, include=FALSE}
+## DIAGNOSTICS AND MODEL VALIDATION
+# Evaluate final model on model validation dataset
+test.predictions <- predict(final_model,test.data)
+
+# Store predicted results and actual results in data frame
+# Note that predicted values are in USD, so that units match with wages from test data
+actuals_preds.test <- data.frame(cbind(actual=test.data$wage, 
+                                  predicted=round(exp(test.predictions),2)))
+
+# Total number of predictors (represents total of all factors)
+p.test <- 25
+
+# Calculate SSE, SST, R^2, adjusted R^2, and AIC on test set
+SSE.test <- sum((actuals_preds.test$actual - actuals_preds.test$predicted)^2)
+SST.test <- sum((actuals_preds.test$actual - mean(actuals_preds.test$actual))^2)
+
+test.r.squared <- 1 - (SSE.test/SST.test)
+test.adj.r.squared <- 1 - ((n.test - 1)*(1 - test.r.squared)/(n.test - p.test))
+test.AIC <- (n.test*log(SSE.test)) - ((n.test*log(n.test)) - 2*p.test) 
+
+
+
+# Mean Square Error (training set)
+# Note that predicted values are in USD, so that units match with wages from training data
+actuals_preds.train <- data.frame(predicted = exp(y.hat), actual = round(train.data$wage,2))
+SSE.train <- sum((actuals_preds.train$actual - actuals_preds.train$predicted)^2)
+MSE.train <- SSE.train/(n.train - p.test)
+
+# Mean Square Prediction Error (testing set)
+MSPE.test <- SSE.test/n.test
+```
+
+The *MSPE* on the model validation dataset is `r paste(round(MSPE.test,2))` while the *MSE* on the model building dataset is `r paste(round(MSE.train,2))`. The *MSPE* is relatively close to the *MSE*, indicating that the model has reasonable predictive power.
+
+c. **Influential Observations and Collinearity**
+
+For our purposes, we are interested in constructing an inferential model (as opposed to predictive) that allows us to better understand the relationship between various demographic factors and salary for employees. Outliers, extreme values, and other influential observations would have a strong impact in the interpretability of that model. We would be most interested in using the DFFITS measure for identifying these observations, because that metric takes into account the impact of each observation on each fitted value the entire model. Figure 12 plots this measure for each data point in the model building dataset.
+
+
+```{r, echo=FALSE, message=FALSE, include=FALSE}
+## INFLUENTIAL OBSERVATIONS
+# Calculate DFFITS measure
+dist <- dffits(final_model)
+
+# Save data point index and DFFITS measure in same data frame
+dat <- data.frame(xvar = 1:n.train, yvar = dist, 
+                  race = train.data$race)
+
+# Plot DFFITS measure by index, highlighting race
+p1 <- ggplot(dat, aes(x = xvar, y = yvar, color = race))+
+  geom_point(shape=1)+ggtitle("DFFITS")+
+  xlab("Index")+ylab("DFFITS")
+
+# Add upper and lower thresholds for identifying influential observations
+p1 <- p1 +
+  geom_abline(intercept = 2*sqrt(p.test/n.train), slope = 0,colour = "black")+
+  geom_abline(intercept = -2*sqrt(p.test/n.train), slope = 0,colour = "black")
+
+```
+
+```{r, echo=FALSE, message=FALSE, include=TRUE,fig.cap="DFFITS Measure on Training Dataset"}
+p1
+```
+
+Due to the size of the dataset, there are many influential observations. It is worth noting that many of the data points deemed influential by this criteria are for African American male employees. This is partially due to their small proportion in the dataset. This finding shows the cruciality of their presence, as the model would otherwise have difficulty predicting their wages. It is likely that these employees have wages that are either above or below the expected value for African American male employees.
+
+We also assess whether of not multicollinearity is present in our model. The generalized variance-inflation factors (*GVIF*) for our model are shown in the table below:
+
+```{r, results="asis", echo=FALSE, message=FALSE}
+## MULTICOLLINEARITY
+# Compute variance inflation factor of final model
+print(xtable(vif(final_model)))
+```
+
+The variables representing interaction terms have high *GVIF* scores due to them being composed of two separate covariates. Each interaction term is collinear with each of its component main effects, and vice versa. The only covariate that has a low *GVIF* value is *exp*, which is not included in any interaction term.
