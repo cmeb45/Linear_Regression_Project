@@ -1,1 +1,2 @@
-# Linear_Regression_Project
+# Linear Regression Project
+STAT GU4205/5205
